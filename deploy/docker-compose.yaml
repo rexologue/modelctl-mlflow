@@ -1,0 +1,86 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: mlflow-postgres
+    restart: unless-stopped
+    env_file: .env
+
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+    networks:
+      - mlflow-net
+
+
+  mlflow:
+    build:
+      context: .
+      args:
+        MLFLOW_VERSION: ${MLFLOW_VERSION}
+
+    container_name: mlflow-server
+    restart: unless-stopped
+    env_file: .env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "5000:5000"
+
+    environment:
+      MLFLOW_AUTH_CONFIG_PATH: /etc/mlflow/basic_auth.ini
+      MLFLOW_ARTIFACT_UPLOAD_DOWNLOAD_TIMEOUT: "3600"
+      MLFLOW_SQLALCHEMYSTORE_POOL_SIZE: "20"
+      MLFLOW_SQLALCHEMYSTORE_MAX_OVERFLOW: "40"
+      MLFLOW_SQLALCHEMYSTORE_POOL_RECYCLE: "3600"
+
+    volumes:
+      - "${MLFLOW_ARTIFACTS_DIR}:/mlflow/artifacts"
+      - ./auth/basic_auth.ini:/etc/mlflow/basic_auth.ini:ro
+
+    command:
+      - sh
+      - -c
+      - |
+        test -f /mlflow/artifacts/.NFS_MLFLOW_ARTIFACTS || {
+          echo "NFS marker missing: /mlflow/artifacts/.NFS_MLFLOW_ARTIFACTS" >&2
+          exit 1
+        }
+
+        exec mlflow server \
+          --app-name basic-auth \
+          --host 0.0.0.0 \
+          --port 5000 \
+          --workers 1 \
+          --backend-store-uri "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}" \
+          --artifacts-destination "file:///mlflow/artifacts" \
+          --allowed-hosts "${MLFLOW_SERVER_ALLOWED_HOSTS}" \
+          --cors-allowed-origins "${MLFLOW_SERVER_CORS_ALLOWED_ORIGINS}"
+    
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.create_connection(('127.0.0.1', 5000), 3); s.close()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+    networks:
+      - mlflow-net
+
+
+volumes:
+  postgres-data:
+
+networks:
+  mlflow-net:
+    driver: bridge
