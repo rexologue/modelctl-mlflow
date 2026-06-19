@@ -12,9 +12,56 @@ MLflow backend storage keeps metadata: runs, versions, aliases, tags and source 
 
 ## Installation
 
+Install as a CLI tool with uv:
+
+```bash
+uv tool install modelctl-mlflow
+```
+
+Run once without installing the tool globally:
+
+```bash
+uvx --from modelctl-mlflow modelctl --help
+```
+
+Install with pip:
+
+```bash
+pip install modelctl-mlflow
+```
+
+For local development from a checkout:
+
 ```bash
 pip install -e .
 ```
+
+or:
+
+```bash
+uv pip install -e .
+```
+
+After installation, the CLI command is:
+
+```bash
+modelctl --help
+```
+
+The PyPI package name is `modelctl-mlflow`; the installed command is `modelctl`.
+
+## Quick start
+
+```bash
+modelctl register ./model my-model
+modelctl list my-model
+modelctl info my-model@champion
+modelctl pull my-model@champion ./downloaded-model
+modelctl verify my-model@champion ./downloaded-model
+modelctl promote my-model 3 champion
+```
+
+Commands print machine-readable JSON to stdout. Human-readable progress and errors are printed to stderr.
 
 ## MLflow connection
 

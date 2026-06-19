@@ -24,6 +24,59 @@ from .core import (
 from .tags import TagError, merge_dicts, parse_key_value_items, read_json_dict
 
 
+TOP_LEVEL_HELP = """\
+Small MLflow Model Registry utility for arbitrary model payloads.
+
+modelctl stores a directory as an opaque payload in MLflow artifacts and keeps
+registry metadata in MLflow Model Registry: versions, aliases, tags and source
+URIs. It does not require the payload to be a Python, sklearn, torch or any
+other framework-specific model.
+"""
+
+TOP_LEVEL_EPILOG = """\
+Quick start:
+  modelctl register ./model my-model
+  modelctl list my-model
+  modelctl info my-model@champion
+  modelctl pull my-model@champion ./downloaded-model
+  modelctl verify my-model@champion ./downloaded-model
+  modelctl promote my-model 3 champion
+
+Model refs:
+  my-model@champion           Resolve by alias
+  my-model:3                  Resolve by version
+  models:/my-model@champion   MLflow alias URI form
+  models:/my-model/3          MLflow version URI form
+
+Connection:
+  By default modelctl uses http://localhost:5000.
+  Override with --host/--port or pass --tracking-uri to any command.
+  MLflow auth is handled by MLflow environment variables, for example:
+  MLFLOW_TRACKING_USERNAME and MLFLOW_TRACKING_PASSWORD.
+
+Registration:
+  The first version gets aliases baseline and champion by default.
+  Later versions get alias candidate by default.
+  Pass --alias one or more times to set explicit aliases.
+  Optional metadata can be passed with --general-tag, --training-tag,
+  --general-tags-json and --training-tags-json.
+
+Pull and verify:
+  pull downloads payload only by default. Use --full-package to download the
+  whole modelctl package with manifest and metadata files.
+  pull verifies the payload hash by default. Use --no-verify only when you
+  intentionally want to skip that check.
+  verify exits with 0 on match, 2 on hash mismatch and 1 on command failure.
+
+Output:
+  Commands print machine-readable JSON to stdout.
+  Human-readable progress and errors go to stderr.
+
+More help:
+  modelctl <command> --help
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the modelctl CLI and return a process exit code."""
 
@@ -49,7 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="modelctl",
-        description="Small MLflow Model Registry utility for versioning arbitrary model payloads.",
+        description=TOP_LEVEL_HELP,
+        epilog=TOP_LEVEL_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"modelctl {__version__}")
 
