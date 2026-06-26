@@ -70,6 +70,7 @@ Pull and verify:
 
 Output:
   Commands print machine-readable JSON to stdout.
+  Pass --json PATH to also write the JSON result to a file.
   Human-readable progress and errors go to stderr.
 
 More help:
@@ -85,12 +86,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = dispatch(args)
+        if result is not None:
+            json_text = render_json(result)
+            if args.json:
+                write_json_output(args.json, json_text)
+            print(json_text)
     except Exception as exc:  # noqa: BLE001 - CLI should print clear errors.
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-
-    if result is not None:
-        print_json(result)
 
     if isinstance(result, VerifyResult) and not result.matches:
         return 2
@@ -126,6 +129,12 @@ def add_common_connection_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tracking-uri", default=None, help="Full MLflow tracking URI. Overrides --host and --port.")
 
 
+def add_common_output_args(parser: argparse.ArgumentParser) -> None:
+    """Add output flags shared by all commands."""
+
+    parser.add_argument("--json", metavar="PATH", default=None, help="Also write the JSON result to PATH.")
+
+
 def add_register_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     """Add the ``register`` command parser."""
 
@@ -139,6 +148,7 @@ def add_register_parser(subparsers: argparse._SubParsersAction[argparse.Argument
     parser.add_argument("--training-tag", action="append", default=None, help="Inline training tag key=value. Can be repeated.")
     parser.add_argument("--description", default=None, help="Optional model version description.")
     add_common_connection_args(parser)
+    add_common_output_args(parser)
 
 
 def add_promote_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -149,6 +159,7 @@ def add_promote_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentP
     parser.add_argument("version", help="Model version number.")
     parser.add_argument("alias", help="Alias to set.")
     add_common_connection_args(parser)
+    add_common_output_args(parser)
 
 
 def add_pull_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -161,6 +172,7 @@ def add_pull_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser.add_argument("--overwrite", action="store_true", help="Replace output_dir if it already exists.")
     parser.add_argument("--no-verify", action="store_true", help="Skip post-download payload hash verification.")
     add_common_connection_args(parser)
+    add_common_output_args(parser)
 
 
 def add_verify_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -170,6 +182,7 @@ def add_verify_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPa
     parser.add_argument("ref", help="Model ref: name@alias, name:version, models:/name@alias or models:/name/version.")
     parser.add_argument("path", help="Directory to verify. Payload directories and full modelctl packages are both accepted.")
     add_common_connection_args(parser)
+    add_common_output_args(parser)
 
 
 def add_list_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -178,6 +191,7 @@ def add_list_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser = subparsers.add_parser("list", help="List versions of a registered model.")
     parser.add_argument("name", help="Registered model name.")
     add_common_connection_args(parser)
+    add_common_output_args(parser)
 
 
 def add_info_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -186,6 +200,7 @@ def add_info_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentPars
     parser = subparsers.add_parser("info", help="Show JSON info for one model ref.")
     parser.add_argument("ref", help="Model ref: name@alias, name:version, models:/name@alias or models:/name/version.")
     add_common_connection_args(parser)
+    add_common_output_args(parser)
 
 
 def dispatch(args: argparse.Namespace) -> Any:
@@ -251,10 +266,18 @@ def load_tags(json_path: str | None, inline_items: list[str] | None) -> dict[str
         raise TagError(str(exc)) from exc
 
 
-def print_json(value: Any) -> None:
-    """Print dataclasses, lists and dictionaries as pretty UTF-8 JSON."""
+def render_json(value: Any) -> str:
+    """Render dataclasses, lists and dictionaries as pretty UTF-8 JSON."""
 
-    print(json.dumps(to_jsonable(value), ensure_ascii=False, indent=2, sort_keys=True))
+    return json.dumps(to_jsonable(value), ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def write_json_output(path: str | Path, json_text: str) -> None:
+    """Write rendered JSON output to a user-provided path."""
+
+    output_path = Path(path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json_text + "\n", encoding="utf-8")
 
 
 def to_jsonable(value: Any) -> Any:

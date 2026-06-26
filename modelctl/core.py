@@ -13,6 +13,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -59,6 +60,8 @@ class PullResult:
     output_path: str
     full_package: bool
     payload_hash: str | None
+    download_size_bytes: int | None
+    payload_size_bytes: int | None
     verified: bool
     replaced_existing: bool
 
@@ -256,16 +259,24 @@ def pull_model(
     source_uri = tags.get("modelctl.source_uri") or str(getattr(model_version, "source", None) or model_uri)
 
     artifact_uri = source_uri if full_package else f"{source_uri}/{PAYLOAD_DIR_NAME}"
+    download_size_bytes = estimate_artifact_tree_size(client, artifact_uri)
+    payload_size_bytes = (
+        estimate_artifact_tree_size(client, f"{source_uri}/{PAYLOAD_DIR_NAME}") if full_package else download_size_bytes
+    )
     staging_dir = make_output_staging_dir(output_path)
     downloaded_candidate: Path | None = None
     try:
-        downloaded_candidate = download_artifact_to_staging(artifact_uri, staging_dir)
+        downloaded_candidate = download_artifact_to_staging(
+            artifact_uri,
+            staging_dir,
+            total_bytes=download_size_bytes,
+        )
         source_to_install = choose_downloaded_source(downloaded_candidate, full_package=full_package)
 
         verified = False
         if verify:
             verify_path = source_to_install / PAYLOAD_DIR_NAME if full_package else source_to_install
-            actual_hash = hash_directory(verify_path, progress=True)
+            actual_hash = hash_directory(verify_path, progress=True, total_bytes=payload_size_bytes)
             if actual_hash != payload_hash:
                 raise ValueError(
                     f"Downloaded payload hash mismatch: expected {payload_hash}, got {actual_hash}"
@@ -282,6 +293,8 @@ def pull_model(
         output_path=str(output_path),
         full_package=full_package,
         payload_hash=payload_hash,
+        download_size_bytes=download_size_bytes,
+        payload_size_bytes=payload_size_bytes,
         verified=verified,
         replaced_existing=replaced_existing,
     )
@@ -509,7 +522,7 @@ def get_required_payload_hash(tags: dict[str, str], *, ref: str) -> str:
     return payload_hash
 
 
-def hash_directory(path: Path, *, progress: bool = False) -> str:
+def hash_directory(path: Path, *, progress: bool = False, total_bytes: int | None = None) -> str:
     """Compute a stable SHA256 hash for all files in a directory.
 
     The hash includes relative file paths and file bytes. Directory mtimes,
@@ -518,8 +531,8 @@ def hash_directory(path: Path, *, progress: bool = False) -> str:
 
     digest = hashlib.sha256()
     processed_bytes = 0
-    next_report_bytes = 5 * 1024**3
-    report_step_bytes = 5 * 1024**3
+    report_step_bytes = progress_report_step(total_bytes)
+    next_report_bytes = report_step_bytes
     for file_path in sorted(item for item in path.rglob("*") if item.is_file()):
         relative_path = file_path.relative_to(path).as_posix()
         digest.update(relative_path.encode("utf-8"))
@@ -530,11 +543,11 @@ def hash_directory(path: Path, *, progress: bool = False) -> str:
                 if progress:
                     processed_bytes += len(chunk)
                     if processed_bytes >= next_report_bytes:
-                        emit_status(f"hashed {format_bytes(processed_bytes)} so far")
+                        emit_status(format_byte_progress("hashed", processed_bytes, total_bytes))
                         next_report_bytes += report_step_bytes
         digest.update(b"\0")
     if progress:
-        emit_status(f"hashed total {format_bytes(processed_bytes)}")
+        emit_status(format_byte_progress("hashed total", processed_bytes, total_bytes))
     return f"{DEFAULT_HASH_ALGORITHM}:{digest.hexdigest()}"
 
 
@@ -580,6 +593,59 @@ def resolve_model_version(client: MlflowClient, ref: str) -> Any:
     return client.get_model_version(name=name, version=str(value))
 
 
+def estimate_artifact_tree_size(client: MlflowClient, artifact_uri: str) -> int | None:
+    """Best-effort byte size estimate for a runs:/ artifact tree."""
+
+    parsed = split_runs_artifact_uri(artifact_uri)
+    if parsed is None:
+        emit_status(f"download size unavailable for non-runs artifact URI: {artifact_uri}")
+        return None
+
+    run_id, artifact_path = parsed
+    try:
+        total_bytes = sum_artifact_tree_size(client, run_id, artifact_path)
+    except Exception as exc:  # noqa: BLE001 - artifact stores differ in listing support.
+        emit_status(f"download size unavailable: {exc}")
+        return None
+
+    if total_bytes is None:
+        emit_status("download size unavailable: artifact store did not report all file sizes")
+        return None
+    return total_bytes
+
+
+def split_runs_artifact_uri(artifact_uri: str) -> tuple[str, str | None] | None:
+    """Return run id and artifact path for a runs:/ URI."""
+
+    if not artifact_uri.startswith("runs:/"):
+        return None
+    stripped = artifact_uri.removeprefix("runs:/").lstrip("/")
+    if not stripped:
+        return None
+    parts = stripped.split("/", 1)
+    run_id = parts[0]
+    artifact_path = parts[1] if len(parts) == 2 and parts[1] else None
+    return run_id, artifact_path
+
+
+def sum_artifact_tree_size(client: MlflowClient, run_id: str, artifact_path: str | None) -> int | None:
+    """Recursively sum MLflow artifact file sizes when the backend exposes them."""
+
+    total_bytes = 0
+    stack: list[str | None] = [artifact_path]
+    while stack:
+        current_path = stack.pop()
+        for info in client.list_artifacts(run_id, current_path):
+            if info.is_dir:
+                stack.append(info.path)
+                continue
+            file_size = getattr(info, "file_size", None)
+            if file_size is None or file_size < 0:
+                return None
+            total_bytes += int(file_size)
+    return total_bytes
+
+
 def make_output_staging_dir(output_path: Path) -> Path:
     """Create a temporary staging directory on the output filesystem."""
 
@@ -589,11 +655,28 @@ def make_output_staging_dir(output_path: Path) -> Path:
     return staging_dir
 
 
-def download_artifact_to_staging(artifact_uri: str, staging_dir: Path) -> Path:
+def download_artifact_to_staging(artifact_uri: str, staging_dir: Path, *, total_bytes: int | None = None) -> Path:
     """Download one artifact into staging and return the downloaded path."""
 
     emit_status(f"downloading artifact: {artifact_uri}")
-    return Path(mlflow.artifacts.download_artifacts(artifact_uri=artifact_uri, dst_path=str(staging_dir))).resolve()
+    if total_bytes is None:
+        emit_status("download size: unknown")
+    else:
+        emit_status(f"download size: {format_bytes(total_bytes)}")
+
+    stop_event = threading.Event()
+    progress_thread = threading.Thread(
+        target=report_download_progress,
+        args=(staging_dir, total_bytes, stop_event),
+        daemon=True,
+    )
+    progress_thread.start()
+    try:
+        return Path(mlflow.artifacts.download_artifacts(artifact_uri=artifact_uri, dst_path=str(staging_dir))).resolve()
+    finally:
+        stop_event.set()
+        progress_thread.join(timeout=1)
+        emit_status(format_byte_progress("downloaded total", local_tree_size_bytes(staging_dir), total_bytes))
 
 
 def choose_downloaded_source(downloaded: Path, *, full_package: bool) -> Path:
@@ -747,6 +830,55 @@ def emit_status(message: str) -> None:
     """Write a human-readable modelctl status line to stderr."""
 
     print(f"[modelctl] {message}", file=sys.stderr, flush=True)
+
+
+def report_download_progress(staging_dir: Path, total_bytes: int | None, stop_event: threading.Event) -> None:
+    """Periodically report bytes observed in the staging directory."""
+
+    last_reported_bytes = -1
+    while not stop_event.wait(5):
+        current_bytes = local_tree_size_bytes(staging_dir)
+        if current_bytes != last_reported_bytes:
+            emit_status(format_byte_progress("downloaded", current_bytes, total_bytes))
+            last_reported_bytes = current_bytes
+
+
+def local_tree_size_bytes(path: Path) -> int:
+    """Return the total size of regular files currently visible under a path."""
+
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return path.stat().st_size
+
+    total_bytes = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total_bytes += item.stat().st_size
+        except OSError:
+            continue
+    return total_bytes
+
+
+def progress_report_step(total_bytes: int | None) -> int:
+    """Choose a progress report step suitable for large model payloads."""
+
+    if total_bytes is None or total_bytes <= 0:
+        return 5 * 1024**3
+    one_percent = max(total_bytes // 100, 1)
+    return max(512 * 1024**2, min(5 * 1024**3, one_percent))
+
+
+def format_byte_progress(label: str, current_bytes: int, total_bytes: int | None) -> str:
+    """Format byte progress with a percent when total size is known."""
+
+    if total_bytes is None:
+        return f"{label} {format_bytes(current_bytes)}"
+    if total_bytes <= 0:
+        return f"{label} {format_bytes(current_bytes)} / {format_bytes(total_bytes)} (100.0%)"
+    percent = min((current_bytes / total_bytes) * 100, 100.0)
+    return f"{label} {format_bytes(current_bytes)} / {format_bytes(total_bytes)} ({percent:.1f}%)"
 
 
 def format_bytes(value: int) -> str:

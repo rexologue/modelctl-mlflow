@@ -61,7 +61,7 @@ modelctl verify my-model@champion ./downloaded-model
 modelctl promote my-model 3 champion
 ```
 
-Commands print machine-readable JSON to stdout. Human-readable progress and errors are printed to stderr.
+Commands print machine-readable JSON to stdout. Pass `--json <path>` to also write the JSON result to a file. Human-readable progress and errors are printed to stderr.
 
 ## MLflow connection
 
@@ -211,6 +211,8 @@ By default, `pull` verifies the downloaded payload hash against `modelctl.payloa
 ```bash
 modelctl pull <model_ref> <output_dir> --no-verify
 ```
+
+For `runs:/...` artifacts, `pull` tries to estimate total bytes with MLflow artifact listing before download. When the backend reports file sizes, stderr progress includes downloaded bytes, percent complete and hash verification percent. If a backend does not expose artifact sizes, progress falls back to observed downloaded bytes without a percent.
 
 If the destination already exists, pass `--overwrite`:
 

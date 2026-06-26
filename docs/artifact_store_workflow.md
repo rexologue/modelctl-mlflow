@@ -225,10 +225,11 @@ Default behavior:
 ```text
 1. Resolve <model_ref> to a concrete Model Registry version.
 2. Read modelctl.payload_hash from Model Version tags.
-3. Download runs:/<run_id>/model/payload to staging.
-4. Hash the staged payload.
-5. Compare the staged hash with the registry hash.
-6. Move staged payload into destination.
+3. Estimate artifact bytes with MLflow artifact listing when the backend reports file sizes.
+4. Download runs:/<run_id>/model/payload to staging and report observed staging bytes.
+5. Hash the staged payload and report byte progress when total size is known.
+6. Compare the staged hash with the registry hash.
+7. Move staged payload into destination.
 ```
 
 The default output is payload-only.
